@@ -1,13 +1,14 @@
 #!/usr/bin/env node
-const record = require('node-record-lpcm16');
-const Speech = require('@google-cloud/speech');
-const DialogFlow = require('dialogflow');
-const credentials = require('./dialogflow-crendentials')
+const record = require('node-record-lpcm16')
+const fs = require('fs')
+const uuid = require('uuid/v1')
+const Speech = require('@google-cloud/speech')
+const TextToSpeech = require('@google-cloud/text-to-speech')
+const DialogFlow = require('dialogflow')
 
-const client = new Speech.SpeechClient();
+const projectId = 'blabber-1535687025249'
 
-const sessionClient = new DialogFlow.SessionsClient();
-const sessionPath = sessionClient.sessionPath(credentials.projectId, credentials.sessionId);
+const client = new Speech.SpeechClient()
 
 function recordRequest () {
     return {
@@ -20,12 +21,31 @@ function recordRequest () {
       }
 }
 
-function dialogflowRequestFrom (query) {
+function dialogflowRequestFrom (sessionPath, query) {
     return {
         session: sessionPath,
-        text: {
-            text: query,
-            languageCode: 'en-US'
+        queryInput: {
+            text: {
+                text: query,
+                languageCode: 'en-US'
+            }    
+        }
+    }
+}
+
+function textToSpeechRequest (text) {
+    return {
+        input: {
+            text
+        },
+        // Select the language and SSML Voice Gender (optional)
+        voice: {
+            languageCode: 'en-US',
+            ssmlGender: 'NEUTRAL'
+        },
+        // Select the type of audio encoding
+        audioConfig: {
+            audioEncoding: 'MP3'
         }
     }
 }
@@ -40,22 +60,45 @@ const recognizeStream = client
           ? `Transcription: ${data.results[0].alternatives[0].transcript}\n`
           : `\n\nReached transcription time limit, press Ctrl+C\n`
     )
+    
+    const sessionClient = new DialogFlow.SessionsClient();
+    const sessionPath = sessionClient.sessionPath(projectId, uuid());
+    const request = dialogflowRequestFrom(sessionPath, data.results[0].alternatives[0].transcript)
 
     sessionClient
-        .detectIntent(dialogflowRequestFrom(data.results[0].alternatives[0].transcript))
+        .detectIntent(request)
         .then(responses => {
-        console.log('Detected intent');
-        const result = responses[0].queryResult;
-        console.log(`  Query: ${result.queryText}`);
-        console.log(`  Response: ${result.fulfillmentText}`);
-        if (result.intent) {
-            console.log(`  Intent: ${result.intent.displayName}`);
-        } else {
-            console.log(`  No intent matched.`);
-        }
+            console.log('Detected intent');
+            const result = responses[0].queryResult;
+            console.log(`  Query: ${result.queryText}`);
+            console.log(`  Response: ${result.fulfillmentText}`);
+
+            const client = new TextToSpeech.TextToSpeechClient();
+            // Performs the Text-to-Speech request
+            client.synthesizeSpeech(textToSpeechRequest(result.fulfillmentText), (err, response) => {
+                if (err) {
+                    console.error('ERROR (TTS):', err)
+                    return
+                }
+            
+                // Write the binary audio content to a local file
+                fs.writeFile('response.mp3', response.audioContent, 'binary', err => {
+                    if (err) {
+                        console.error('ERROR (Node FS):', err)
+                        return
+                    }
+                    console.log('Audio content written to file: response.mp3')
+                })
+            })
+  
+            if (result.intent) {
+                console.log(`  Intent: ${result.intent.displayName}`);
+            } else {
+                console.log(`  No intent matched.`);
+            }
         })
         .catch(err => {
-        console.error('ERROR:', err);
+            console.error('ERROR (Dialogflow):', err);
         });
     }
   );
