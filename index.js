@@ -96,8 +96,8 @@ function processTtsResponse (err, response) {
             console.error('ERROR (Node FS):', err)
             return
         }
-        responseCounter++
         console.log(`Audio content written to file: response-${responseCounter}.mp3`)
+        responseCounter++
     })
 }
 
