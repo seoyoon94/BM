@@ -6,11 +6,28 @@ const Speech = require('@google-cloud/speech')
 const TextToSpeech = require('@google-cloud/text-to-speech')
 const DialogFlow = require('dialogflow')
 
-const projectId = 'blabber-1535687025249'
+let responseCounter = 1
 
-const client = new Speech.SpeechClient()
+/**
+ * Dialogflow Project ID
+ */
+const dialogflowProjectId = 'blabber-1535687025249'
 
-function recordRequest () {
+/**
+ * Instantiate client libraries.
+ */
+const speechToTextClient = new Speech.SpeechClient()
+const dialogflowClient = new DialogFlow.SessionsClient()
+const textToSpeechClient = new TextToSpeech.TextToSpeechClient()
+
+const sessionPath = dialogflowClient.sessionPath(dialogflowProjectId, uuid());
+
+/**
+ * Creates a request for the node voice record library
+ * with static values.
+ * @returns {object} Request for node voice recording.
+ */
+function createVoiceRecordRequest () {
     return {
         config: {
           encoding: 'LINEAR16',
@@ -21,7 +38,14 @@ function recordRequest () {
       }
 }
 
-function dialogflowRequestFrom (sessionPath, query) {
+/**
+ * Creates a request for Dialogflow for a given session
+ * with user input.
+ * @param {string} sessionPath Session path for the Dialogflow request.
+ * @param {string} query User input query.
+ * @returns {object} Dialogflow client request.
+ */
+function dialogflowRequest (query) {
     return {
         session: sessionPath,
         queryInput: {
@@ -33,88 +57,127 @@ function dialogflowRequestFrom (sessionPath, query) {
     }
 }
 
+/**
+ * Creates a request for the text to speech client.
+ * @param {string} text Text to be translated into a voice output.
+ * @returns {object} Static request for the text to speech client.
+ */
 function textToSpeechRequest (text) {
     return {
         input: {
             text
         },
-        // Select the language and SSML Voice Gender (optional)
         voice: {
             languageCode: 'en-US',
             ssmlGender: 'NEUTRAL'
         },
-        // Select the type of audio encoding
         audioConfig: {
             audioEncoding: 'MP3'
         }
     }
 }
 
-// Create a recognize stream
-const recognizeStream = client
-  .streamingRecognize(recordRequest())
-  .on('error', console.error)
-  .on('data', data => {
-    process.stdout.write(
-        data.results[0] && data.results[0].alternatives[0]
-          ? `Transcription: ${data.results[0].alternatives[0].transcript}\n`
-          : `\n\nReached transcription time limit, press Ctrl+C\n`
-    )
-    
-    const sessionClient = new DialogFlow.SessionsClient();
-    const sessionPath = sessionClient.sessionPath(projectId, uuid());
-    const request = dialogflowRequestFrom(sessionPath, data.results[0].alternatives[0].transcript)
+/**
+ * Transforms raw audio content into a usable MP3 file.
+ * @param {Error} err Node error object.
+ * @param {object} response Response containing audio content
+ *      parsed from a text input.
+ * @returns {undefined} No output.
+ */
+function processTtsResponse (err, response) {
+    if (err) {
+        console.error('ERROR (TTS):', err)
+        return
+    }
 
-    sessionClient
+    // Write the binary audio content to a local file
+    fs.writeFile(`response-${responseCounter}.mp3`, response.audioContent, 'binary', err => {
+        if (err) {
+            console.error('ERROR (Node FS):', err)
+            return
+        }
+        responseCounter++
+        console.log(`Audio content written to file: response-${responseCounter}.mp3`)
+    })
+}
+
+/**
+ * Given responses from the Dialogflow client library,
+ * parse the responses for a valid output.
+ * @param {array} responses Array of responses from Dialogflow.
+ * @returns {undefined} No output.
+ */
+function processDialogflowResponses (responses) {
+    console.log('Detected intent');
+    const result = responses[0].queryResult;
+    console.log(`  Query: ${result.queryText}`);
+    console.log(`  Response: ${result.fulfillmentText}`);
+
+    const ttsRequest = textToSpeechRequest(result.fulfillmentText)
+    textToSpeechClient.synthesizeSpeech(ttsRequest, processTtsResponse)
+
+    result.intent
+        ? console.log(`  Intent: ${result.intent.displayName}`)
+        : console.log(`  No intent matched.`)
+}
+
+/**
+ * Takes data from the node recorder and generates an MP3
+ * response to user input.
+ * @param {object} data Raw data from the node recorder.
+ * @returns {undefined} No output.
+ */
+function generateResponse (data) {
+    if (!data.results[0] || !data.results[0].alternatives[0]) {
+        console.log(`\n\nReached transcription time limit, press Ctrl+C\n`)
+        return
+    }
+
+    const transcribedInput = data.results[0].alternatives[0].transcript
+    console.log(`Transcription: ${transcribedInput}\n`)
+
+    const request = dialogflowRequest(transcribedInput)
+    dialogflowClient
         .detectIntent(request)
-        .then(responses => {
-            console.log('Detected intent');
-            const result = responses[0].queryResult;
-            console.log(`  Query: ${result.queryText}`);
-            console.log(`  Response: ${result.fulfillmentText}`);
-
-            const client = new TextToSpeech.TextToSpeechClient();
-            // Performs the Text-to-Speech request
-            client.synthesizeSpeech(textToSpeechRequest(result.fulfillmentText), (err, response) => {
-                if (err) {
-                    console.error('ERROR (TTS):', err)
-                    return
-                }
-            
-                // Write the binary audio content to a local file
-                fs.writeFile('response.mp3', response.audioContent, 'binary', err => {
-                    if (err) {
-                        console.error('ERROR (Node FS):', err)
-                        return
-                    }
-                    console.log('Audio content written to file: response.mp3')
-                })
-            })
-  
-            if (result.intent) {
-                console.log(`  Intent: ${result.intent.displayName}`);
-            } else {
-                console.log(`  No intent matched.`);
-            }
-        })
+        .then(processDialogflowResponses)
         .catch(err => {
             console.error('ERROR (Dialogflow):', err);
         });
-    }
-  );
+}
 
-// Start recording and send the microphone input to the Speech API
-record
-  .start({
-    sampleRateHertz: 16000,
-    threshold: 0,
-    // Other options, see https://www.npmjs.com/package/node-record-lpcm16#options
-    verbose: false,
-    recordProgram: 'rec', // Try also "arecord" or "sox"
-    silence: '10.0',
-  })
-  .on('error', console.error)
-  .pipe(recognizeStream);
+/**
+ * Initializes the node voice recorder instance and
+ * returns the instance.
+ * @returns {object} Initialized voice recorder.
+ */
+function initializeSpeechToTextClient () {
+    return speechToTextClient
+        .streamingRecognize(createVoiceRecordRequest())
+        .on('error', console.error)
+        .on('data', generateResponse)
+}
 
+/**
+ * Main function to be executed.
+ */
+function main () {
+    // Create a recognize stream
+    const recognizeStream = initializeSpeechToTextClient()
 
-console.log('Listening, press Ctrl+C to stop.');
+    // Start recording and send the microphone input to the Speech API
+    record
+        .start({
+            sampleRateHertz: 16000,
+            threshold: 0,
+            // Other options, see https://www.npmjs.com/package/node-record-lpcm16#options
+            verbose: false,
+            recordProgram: 'rec', // Try also "arecord" or "sox"
+            silence: '1.0',
+        })
+        .on('error', console.error)
+        .pipe(recognizeStream);
+
+    console.log('Listening, press Ctrl+C to stop.');
+}
+
+main()
